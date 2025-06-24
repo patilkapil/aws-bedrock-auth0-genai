@@ -1,0 +1,21 @@
+# Flask and web framework dependencies
+Flask==3.0.0
+Werkzeug==3.0.1
+
+# Authentication and OAuth
+Authlib==1.3.0
+python-dotenv==1.0.0
+
+# AWS SDK
+boto3==1.34.0
+botocore==1.34.0
+
+# HTTP requests
+requests==2.31.0
+urllib3==2.0.7
+
+# JSON and data handling
+six==1.16.0
+
+# Development and debugging
+python-dateutil==2.8.2
