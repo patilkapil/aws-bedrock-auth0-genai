@@ -5,6 +5,7 @@
 This project demonstrates a reference architecture for integrating AWS Bedrock with Auth0 to enable secure, authenticated, and authorized access to GenAI (Generative AI) applications and external data sources.
 
 ## Architecture Overview
+![image (10)](https://github.com/user-attachments/assets/8036bd3e-8d6b-4b1a-a7ae-cd5053679535)
 
 The architecture consists of the following key components:
 
