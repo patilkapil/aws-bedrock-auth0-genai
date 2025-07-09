@@ -175,7 +175,7 @@ def get_tokenset():
         "grant_type": "urn:auth0:params:oauth:grant-type:token-exchange:federated-connection-access-token",
         "subject_token_type": "urn:ietf:params:oauth:token-type:refresh_token",
         "subject_token": session["refresh_token"],
-        "connection": "kp-oidc",
+        "connection": "<<Connection Name from Auth0>>",
         "audience": f"https://{env.get('AUTH0_DOMAIN')}/api/v2/",
         "requested_token_type": "http://auth0.com/oauth/token-type/federated-connection-access-token",
         "scope": "okta.users.read okta.users.read.self"
