@@ -115,9 +115,11 @@ def callback():
         }
 
         # Store the tokens
+
         session['user'] = token
         if "refresh_token" in token:
             session["refresh_token"] = token["refresh_token"]
+            asyncio.run(auth01.state_store.set(auth01.state_identifier, {"refresh_token": token["refresh_token"],"connection_token_sets": []}))
             print("Stored refresh token in session")
         else:
             print("No refresh token received")
@@ -156,9 +158,7 @@ async def get_token_from_token_vault():
             "scope" : "openid profile email offline_access"})
 
 def get_tokenset():
-    if not session.get("refresh_token"):
-        print("No refresh token available in session")
-        return None
+
     '''url = f"https://{env.get('AUTH0_DOMAIN')}/oauth/token"
     headers = {"content-type": "application/json"}
     payload = {
@@ -177,7 +177,7 @@ def get_tokenset():
         tokenset=asyncio.run(get_token_from_token_vault())
         print("##############")
         print('Token response:', tokenset)
-        return tokenset.get("access_token")
+        return tokenset
     except requests.exceptions.RequestException as e:
         error_text = e.response.text if hasattr(e, 'response') else "No response"
         print("Error getting token:", error_text)
