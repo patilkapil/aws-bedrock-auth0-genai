@@ -119,7 +119,8 @@ def callback():
         session['user'] = token
         if "refresh_token" in token:
             session["refresh_token"] = token["refresh_token"]
-            asyncio.run(auth01.state_store.set(auth01.state_identifier, {"refresh_token": token["refresh_token"],"connection_token_sets": []}))
+            asyncio.run(auth01.state_store.set(auth01.state_identifier,
+                {"refresh_token": token["refresh_token"],"connection_token_sets": []}))
             print("Stored refresh token in session")
         else:
             print("No refresh token received")
