@@ -1,5 +1,7 @@
+import asyncio
 import os
 import json
+import time
 from functools import wraps
 from traceback import print_exc
 
@@ -9,6 +11,7 @@ from dotenv import load_dotenv
 import boto3
 import requests
 from os import environ as env
+from auth0_server_python.auth_server import ServerClient
 
 import uuid
 
@@ -54,6 +57,44 @@ auth0 = oauth.register(
     server_metadata_url=f'https://{AUTH0_DOMAIN}/.well-known/openid-configuration'
 )
 
+class MemoryTransactionStore:
+    """
+    In-memory transaction store for Auth0 token vault operations.
+    
+    This class provides a simple in-memory storage mechanism for Auth0 SDK operations,
+    including transaction state and token management. It implements the async interface
+    required by the Auth0 ServerClient for storing and retrieving authentication state.
+    
+    Note: This is a development implementation. For production, consider using a
+    persistent storage solution like Redis, DynamoDB, or a database.
+    """
+    def __init__(self):
+        self.store = {}
+
+    async def set(self, key, value, options=None):
+        self.store[key] = value
+
+    async def get(self, key, options=None):
+        return self.store.get(key)
+
+    async def delete(self, key, options=None):
+        if key in self.store:
+            del self.store[key]
+
+# Initialize Auth0 Server Client for token vault
+auth0_backend = ServerClient(
+    domain=os.getenv("AUTH0_DOMAIN"),
+    client_id=os.getenv("AUTH0_CLIENT_ID"),
+    client_secret=os.getenv("AUTH0_CLIENT_SECRET"),
+    secret=os.getenv("AUTH0_SECRET"),
+    redirect_uri=os.getenv("APP_BASE_URL") + "/auth/callback",
+    transaction_store=MemoryTransactionStore(),
+    state_store=MemoryTransactionStore(),
+    authorization_params={
+        "scope": "openid profile email offline_access",
+    }
+)
+
 def requires_auth(f):
     """
     Decorator to require authentication for protected routes.
@@ -91,7 +132,7 @@ def login():
 def callback():
     """
     Handle Auth0 callback after successful authentication.
-    Stores user information and tokens in session.
+    Stores user information, tokens, and connection token sets in session.
     """
     try:
         # Get the token using the callback
@@ -106,11 +147,48 @@ def callback():
             'picture': userinfo['picture']
         }
 
-        # Store the tokens
+        # Create connection token sets for token vault
+        connection_token_sets = [{
+            "connection": "kp-oidc",
+            "login_hint": userinfo.get('email'),
+            "access_token": token.get("id_token"),
+            "scope": "openid profile email offline_access",
+        }]
+
+        # Create comprehensive state data for token vault
+        state_data = {
+            "user": {
+                "sub": userinfo['sub'],
+                "name": userinfo.get('name'),
+                "email": userinfo.get('email'),
+                "picture": userinfo.get('picture'),
+            },
+            "id_token": token.get("id_token"),
+            "refresh_token": token["refresh_token"],
+            "connection_token_sets": connection_token_sets,
+            "token_sets": [],
+            "internal": {
+                "sid": str(uuid.uuid4()),
+                "created_at": int(time.time())
+            }
+        }
+        session['auth_state_data'] = state_data
+
+        # Store state data in Auth0 backend state store
+        asyncio.run(auth0_backend.state_store.set(
+            auth0_backend.state_identifier,
+            state_data
+        ))
+
+        # Store the tokens in session
         session['user'] = token
         if "refresh_token" in token:
             session["refresh_token"] = token["refresh_token"]
-            print("Stored refresh token in session")
+            asyncio.run(auth0_backend.state_store.set(
+                auth0_backend.state_identifier, 
+                {"refresh_token": token["refresh_token"]}
+            ))
+            print("Stored refresh token in session and state store")
         else:
             print("No refresh token received")
 
@@ -156,42 +234,41 @@ def get_completion_from_response(response):
         completion += chunk["bytes"].decode()
     return completion
 
-def get_tokenset():
+async def get_token_from_token_vault():
     """
-    Exchange refresh token for federated access token.
+    Get access token from token vault using Auth0 SDK.
     
     Returns:
-        str: Federated access token or None if exchange fails
+        str: Access token for the connection
     """
-    if not session.get("refresh_token"):
-        print("No refresh token available in session")
-        return None
+    # Get the stored state from the session
+    state_data = session.get("auth_state_data")
+    if not state_data:
+        raise Exception("No auth state data found in session")
 
-    url = f"https://{env.get('AUTH0_DOMAIN')}/oauth/token"
-    headers = {"content-type": "application/json"}
-    payload = {
-        "client_id": env.get("AUTH0_CLIENT_ID"),
-        "client_secret": env.get("AUTH0_CLIENT_SECRET"),
-        "grant_type": "urn:auth0:params:oauth:grant-type:token-exchange:federated-connection-access-token",
-        "subject_token_type": "urn:ietf:params:oauth:token-type:refresh_token",
-        "subject_token": session["refresh_token"],
-        "connection": "<<Connection Name from Auth0>>",
-        "audience": f"https://{env.get('AUTH0_DOMAIN')}/api/v2/",
-        "requested_token_type": "http://auth0.com/oauth/token-type/federated-connection-access-token",
-        "scope": "okta.users.read okta.users.read.self"
-    }
+    # Inject into state store manually
+    await auth0_backend.state_store.set(auth0_backend.state_identifier, state_data)
 
+    return await auth0_backend.get_access_token_for_connection({
+        "connection": "kp-oidc",
+        "scope": "openid profile email offline_access"
+    })
+
+def get_tokenset():
+    """
+    Get federated access token from token vault.
+    
+    Returns:
+        str: Federated access token or None if retrieval fails
+    """
     try:
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status()
-        tokenset = response.json()
-        return tokenset.get("access_token")
-    except requests.exceptions.RequestException as e:
-        error_text = e.response.text if hasattr(e, 'response') else "No response"
-        print("Error getting token:", error_text)
+        tokenset = asyncio.run(get_token_from_token_vault())
+        print("##############")
+        print('Token response:', tokenset)
+        return tokenset
+    except Exception as e:
+        print(f"Error getting token from vault: {str(e)}")
         return None
-
-
 
 @app.route("/chat", methods=["POST"])
 @requires_auth
@@ -208,7 +285,7 @@ def chat():
         - Session ID and request ID for tracking
     """
     try:
-        # Get the federated token
+        # Get the federated token from token vault
         federated_token = get_tokenset()
         print('Federated token response:', federated_token)
 
@@ -246,6 +323,14 @@ def chat():
 
         # Log action trace information
         trace = response.get('trace', [])
+        for step in trace:
+            if step.get('type') == 'InvokeAction':
+                action_group = step.get('actionGroup')
+                function_name = step.get('function')
+                parameters = step.get('parameters', [])
+                print(f"Action Group: {action_group}")
+                print(f"Function: {function_name}")
+                print(f"Parameters: {parameters}")
 
         # Process the response
         completion = []
