@@ -22,7 +22,7 @@ load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
-app.secret_key = os.getenv("APP_SECRET_KEY", "your-random-secret-key")
+app.secret_key = os.getenv("APP_SECRET_KEY", "REPLACE_WITH_YOUR_SECRET_KEY")
 app.config['SESSION_COOKIE_SAMESITE'] = "Lax"
 
 # Auth0 Configuration
@@ -37,10 +37,94 @@ AWS_DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION")
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 
+# DynamoDB Configuration
+SESSION_TABLE_NAME = os.getenv("SESSION_TABLE_NAME", "bedrock-sessions")
+
 # Bedrock Configuration
 BEDROCK_AGENT_ID = os.getenv("BEDROCK_AGENT_ID")
 BEDROCK_AGENT_ALIAS_ID = os.getenv("BEDROCK_AGENT_ALIAS_ID")
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0")
+
+# Connection Configuration
+CONNECTION_NAME = os.getenv("CONNECTION_NAME", "kp-oidc")
+DEFAULT_SCOPE = os.getenv("DEFAULT_SCOPE", "openid profile email offline_access")
+OKTA_SCOPE = os.getenv("OKTA_SCOPE", "openid profile email offline_access okta.users.read")
+
+# Initialize AWS clients
+dynamodb = boto3.resource(
+    'dynamodb',
+    region_name=AWS_DEFAULT_REGION,
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+)
+
+bedrock = boto3.client(
+    service_name="bedrock-agent-runtime",
+    region_name=AWS_DEFAULT_REGION,
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+)
+
+# DynamoDB helper functions
+def store_session_data(session_id, refresh_token, federated_token, user_data):
+    """
+    Store session data in DynamoDB
+    
+    Args:
+        session_id: Unique session identifier
+        refresh_token: Auth0 refresh token
+        federated_token: Federated access token
+        user_data: User profile information
+    """
+    try:
+        table = dynamodb.Table(SESSION_TABLE_NAME)
+        
+        # TTL: Session expires in 24 hours
+        ttl = int(time.time()) + (24 * 60 * 60)
+        
+        table.put_item(
+            Item={
+                'session_id': session_id,
+                'refresh_token': refresh_token,
+                'federated_token': federated_token,
+                'user_id': user_data.get('user_id'),
+                'user_email': user_data.get('email'),
+                'user_name': user_data.get('name'),
+                'user_picture': user_data.get('picture'),
+                'ttl': ttl,
+                'created_at': int(time.time())
+            }
+        )
+        print(f"Stored session data for session_id: {session_id}")
+        
+    except Exception as e:
+        print(f"Error storing session data: {str(e)}")
+        raise
+
+def get_session_data(session_id):
+    """
+    Retrieve session data from DynamoDB
+    
+    Args:
+        session_id: Session identifier
+        
+    Returns:
+        Dict containing session data or None if not found
+    """
+    try:
+        table = dynamodb.Table(SESSION_TABLE_NAME)
+        response = table.get_item(Key={'session_id': session_id})
+        item = response.get('Item')
+        
+        if item:
+            # Remove TTL field from response
+            item.pop('ttl', None)
+            return item
+        return None
+        
+    except Exception as e:
+        print(f"Error retrieving session data for {session_id}: {str(e)}")
+        return None
 
 # Auth0 OAuth Configuration
 oauth = OAuth(app)
@@ -107,14 +191,6 @@ def requires_auth(f):
         return f(*args, **kwargs)
     return decorated
 
-# Initialize AWS Bedrock client
-bedrock = boto3.client(
-    service_name="bedrock-agent-runtime",
-    region_name=AWS_DEFAULT_REGION,
-    aws_access_key_id=AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-)
-
 @app.route("/login")
 def login():
     """
@@ -132,24 +208,47 @@ def login():
 def callback():
     """
     Handle Auth0 callback after successful authentication.
-    Stores user information, tokens, and connection token sets in session.
+    Stores user information in session and tokens in DynamoDB.
     """
     try:
         # Get the token using the callback
         token = auth0.authorize_access_token()
+        print(f"Token received: {token}")
 
         # Store the user info in session
         userinfo = auth0.get('userinfo').json()
-        session['profile'] = {
+        print(f"User info received: {userinfo}")
+
+        user_profile = {
             'user_id': userinfo['sub'],
             'name': userinfo['name'],
             'email': userinfo['email'],
             'picture': userinfo['picture']
         }
+        session['profile'] = user_profile
+
+        # Generate a unique session ID for DynamoDB storage
+        session_id = str(uuid.uuid4())
+        session['session_id'] = session_id
+
+        # Get federated token from token vault
+        federated_token = None
+        try:
+            federated_token = get_tokenset_sync(token, userinfo)
+        except Exception as e:
+            print(f"Warning: Could not get federated token: {str(e)}")
+
+        # Store session data in DynamoDB
+        store_session_data(
+            session_id=session_id,
+            refresh_token=token.get("refresh_token"),
+            federated_token=federated_token,
+            user_data=user_profile
+        )
 
         # Create connection token sets for token vault
         connection_token_sets = [{
-            "connection": "kp-oidc",
+            "connection": CONNECTION_NAME,
             "login_hint": userinfo.get('email'),
             "access_token": token.get("id_token"),
             "scope": "openid profile email offline_access",
@@ -164,7 +263,7 @@ def callback():
                 "picture": userinfo.get('picture'),
             },
             "id_token": token.get("id_token"),
-            "refresh_token": token["refresh_token"],
+            "refresh_token": token.get("refresh_token"),
             "connection_token_sets": connection_token_sets,
             "token_sets": [],
             "internal": {
@@ -195,6 +294,9 @@ def callback():
         return redirect('/')
     except Exception as e:
         print(f"Error in callback: {str(e)}")
+        print(f"Error type: {type(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         session.clear()
         return redirect('/login')
 
@@ -250,7 +352,7 @@ async def get_token_from_token_vault():
     await auth0_backend.state_store.set(auth0_backend.state_identifier, state_data)
 
     return await auth0_backend.get_access_token_for_connection({
-        "connection": "kp-oidc",
+        "connection": CONNECTION_NAME,
         "scope": "openid profile email offline_access"
     })
 
@@ -270,6 +372,54 @@ def get_tokenset():
         print(f"Error getting token from vault: {str(e)}")
         return None
 
+def get_tokenset_sync(token, userinfo):
+    """
+    Synchronous version for callback processing.
+    
+    Args:
+        token: Auth0 token response
+        userinfo: User information from Auth0
+        
+    Returns:
+        str: Federated access token or None if retrieval fails
+    """
+    try:
+        # Create state data for token vault
+        state_data = {
+            "user": {
+                "sub": userinfo['sub'],
+                "name": userinfo.get('name'),
+                "email": userinfo.get('email'),
+                "picture": userinfo.get('picture'),
+            },
+            "id_token": token.get("id_token"),
+            "refresh_token": token.get("refresh_token"),
+            "connection_token_sets": [{
+                "connection": CONNECTION_NAME,
+                "login_hint": userinfo.get('email'),
+                "access_token": token.get("id_token"),
+                "scope": DEFAULT_SCOPE,
+            }],
+            "token_sets": [],
+            "internal": {
+                "sid": str(uuid.uuid4()),
+                "created_at": int(time.time())
+            }
+        }
+        
+        # Store in auth0_backend state store
+        async def get_token():
+            await auth0_backend.state_store.set(auth0_backend.state_identifier, state_data)
+            return await auth0_backend.get_access_token_for_connection({
+                "connection": CONNECTION_NAME,
+                "scope": DEFAULT_SCOPE
+            })
+        
+        return asyncio.run(get_token())
+    except Exception as e:
+        print(f"Error getting token from vault (sync): {str(e)}")
+        return None
+
 @app.route("/chat", methods=["POST"])
 @requires_auth
 def chat():
@@ -285,31 +435,33 @@ def chat():
         - Session ID and request ID for tracking
     """
     try:
-        # Get the federated token from token vault
-        federated_token = get_tokenset()
-        print('Federated token response:', federated_token)
-
-        if not federated_token:
-            return jsonify({"response": "Failed to obtain federated token. Please try logging in again."}), 401
-
         user_message = request.json.get("message", "")
         if not user_message:
             return jsonify({"response": "No message provided."}), 400
 
-        # Create a new session ID for this conversation
-        session_id = str(uuid.uuid4())
+        # Get the session ID from Flask session
+        session_id = session.get('session_id')
+        if not session_id:
+            return jsonify({"response": "No session ID found. Please log in again."}), 401
 
-        # Prepare the session state with the federated token
+        # Verify the session exists in DynamoDB
+        session_data = get_session_data(session_id)
+        if not session_data:
+            return jsonify({"response": "Session expired or invalid. Please log in again."}), 401
+
+        print(f'Using session_id: {session_id}')
+
+        # Prepare the session state with ONLY session_id and basic user info
+        # No tokens are sent to Bedrock
         session_state = {
             "sessionAttributes": {
-                "refresh_token": session['refresh_token'],
-                "federated_token": federated_token,
+                "session_id": session_id,
                 "logged_in_user": session['profile']['email'],
                 "user_id": session['profile']['user_id']
             }
         }
 
-        print('Session state:', session_state)
+        print('Session state (secure - no tokens):', session_state)
 
         # Invoke the Bedrock agent
         response = bedrock.invoke_agent(

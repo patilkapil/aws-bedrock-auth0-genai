@@ -1,113 +1,162 @@
-# Bedrock Agent with Auth0 Integration
+# Bedrock Flask Agent
 
-A Flask-based web application that integrates AWS Bedrock Agent with Auth0 authentication and Okta federated identity management. This application provides a secure chat interface where users can interact with a Bedrock agent while maintaining proper authentication and authorization.
+A Flask web application that integrates Auth0 authentication with AWS Bedrock agents, featuring secure session management and token vault functionality.
 
 ## Features
 
-- 🔐 **Auth0 Authentication**: Secure user authentication using Auth0
-- 🔗 **Okta Federation**: Federated identity management with Okta
-- 🤖 **AWS Bedrock Agent**: AI-powered chat interface using AWS Bedrock
-- 🔒 **Token Vault**: Automatic token refresh and federated token exchange
-- 🛡️ **Session Management**: Secure session handling with CSRF protection
+- **Auth0 Authentication**: Secure user authentication with OAuth 2.0
+- **Token Vault Integration**: Federated token management using Auth0 Server SDK
+- **DynamoDB Session Storage**: Persistent session management with automatic TTL
+- **AWS Bedrock Integration**: AI agent interactions with context preservation
+- **Production Ready**: Environment-based configuration with no hardcoded secrets
 
-## Prerequisites
+## Architecture
 
-- Python 3.8 or higher
-- AWS Account with Bedrock access
-- Auth0 Account
-- Okta Account (for federated authentication)
-- AWS CLI configured (optional, for local development)
+```
+User -> Auth0 Login -> Flask App -> DynamoDB (Session Storage)
+                                -> AWS Bedrock Agent
+                                -> Token Vault (Auth0 SDK)
+```
 
-## Installation
+## Environment Variables
 
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd bedrock-agent-app
-   ```
+### Required Configuration
 
-2. **Create a virtual environment**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+```bash
+# Application Settings
+APP_SECRET_KEY=REPLACE_WITH_YOUR_SECRET_KEY
+APP_BASE_URL=http://localhost:5000
 
-3. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+# Auth0 Configuration
+AUTH0_DOMAIN=your-tenant.auth0.com
+AUTH0_CLIENT_ID=your_client_id
+AUTH0_CLIENT_SECRET=your_client_secret
+AUTH0_SECRET=REPLACE_WITH_YOUR_AUTH0_SECRET
+AUTH0_CALLBACK_URL=http://localhost:5000/callback
 
-4. **Set up environment variables**
-   Create a `.env` file in the root directory:
-   ```env
-   # Flask Configuration
-   APP_SECRET_KEY=your-random-secret-key
-   
-   # Auth0 Configuration
-   AUTH0_CLIENT_ID=your-auth0-client-id
-   AUTH0_CLIENT_SECRET=your-auth0-client-secret
-   AUTH0_DOMAIN=your-auth0-domain.auth0.com
-   AUTH0_CALLBACK_URL=http://127.0.0.1:5000/callback
-   
-   # AWS Configuration
-   AWS_DEFAULT_REGION=us-east-1
-   AWS_ACCESS_KEY_ID=your-aws-access-key
-   AWS_SECRET_ACCESS_KEY=your-aws-secret-key
-   
-   # Bedrock Configuration
-   BEDROCK_AGENT_ID=your-bedrock-agent-id
-   BEDROCK_AGENT_ALIAS_ID=your-bedrock-agent-alias-id
-   BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
-   ```
+# AWS Configuration
+AWS_DEFAULT_REGION=us-east-1
+AWS_ACCESS_KEY_ID=your_access_key
+AWS_SECRET_ACCESS_KEY=your_secret_key
 
-## Configuration
+# Bedrock Configuration
+BEDROCK_AGENT_ID=your_agent_id
+BEDROCK_AGENT_ALIAS_ID=your_alias_id
+BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
 
-### Auth0 Setup
+# DynamoDB Configuration
+SESSION_TABLE_NAME=bedrock-sessions
+
+# Connection Configuration
+CONNECTION_NAME=kp-oidc
+DEFAULT_SCOPE=openid profile email offline_access
+OKTA_SCOPE=openid profile email offline_access okta.users.read
+```
+
+## Setup
+
+### 1. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Create DynamoDB Table
+
+Create a DynamoDB table with the following configuration:
+- **Table Name**: `bedrock-sessions` (or value from `SESSION_TABLE_NAME`)
+- **Partition Key**: `session_id` (String)
+- **TTL Attribute**: `ttl` (Number)
+
+### 3. Configure Auth0
 
 1. Create an Auth0 application
-2. Configure the following settings:
-   - **Application Type**: Regular Web Application
-   - **Allowed Callback URLs**: `http://127.0.0.1:5000/callback`
-   - **Allowed Logout URLs**: `http://127.0.0.1:5000`
-   - **Scopes**: `openid profile email offline_access okta.users.read`
+2. Set callback URL: `http://localhost:5000/callback`
+3. Enable refresh tokens
+4. Configure connection for token vault
 
-3. Set up Okta as a federated connection in Auth0
+### 4. Set Environment Variables
 
-### AWS Bedrock Setup
+Create a `.env` file with the required configuration (see above).
 
-1. Create a Bedrock Agent in AWS Console
-2. Configure the agent with appropriate action groups
-3. Note down the Agent ID and Agent Alias ID
+### 5. Run the Application
 
-### Okta Configuration
+```bash
+python agent.py
+```
 
-1. Set up Okta as an OIDC provider
-2. Configure the connection in Auth0
-3. Ensure proper scopes are configured for user management
+The application will be available at `http://localhost:5000`.
 
-## Usage
+## API Endpoints
 
-### Running the Application
+### Authentication Routes
 
-1. **Start the Flask application**
-   ```bash
-   python app/agent.py
-   ```
+- `GET /login` - Initiate Auth0 login
+- `GET /callback` - Handle Auth0 callback
+- `GET /logout` - Logout user
 
-2. **Access the application**
-   - Open your browser and navigate to `http://127.0.0.1:5000`
-   - You will be redirected to Auth0 for authentication
-   - After successful authentication, you'll be redirected back to the application
-
-3. **Using the Chat Interface**
-   - Once authenticated, you can interact with the Bedrock agent
-   - Send messages through the chat interface
-   - The agent will process your requests and provide responses
-
-### API Endpoints
+### Application Routes
 
 - `GET /` - Main application page (requires authentication)
-- `GET /login` - Initiate Auth0 login flow
-- `GET /callback` - Handle Auth0 callback
-- `GET /logout` - Handle user logout
-- `POST /chat` - Chat endpoint for Bedrock agent interaction
+- `POST /chat` - Chat with Bedrock agent (requires authentication)
+
+### Chat API
+
+**Request:**
+```json
+{
+  "message": "Your message to the AI agent"
+}
+```
+
+**Response:**
+```json
+{
+  "response": "AI agent response",
+  "sessionId": "unique-session-id",
+  "requestId": "bedrock-request-id"
+}
+```
+
+## Security Features
+
+- **No Token Exposure**: Tokens are stored securely in DynamoDB, not sent to Bedrock
+- **Session Validation**: All requests validate session existence in DynamoDB
+- **Automatic Cleanup**: Sessions expire automatically using DynamoDB TTL
+- **Environment Configuration**: All secrets are externalized to environment variables
+
+## DynamoDB Schema
+
+```json
+{
+  "session_id": "unique-uuid",
+  "refresh_token": "auth0-refresh-token",
+  "federated_token": "federated-access-token",
+  "user_id": "auth0-user-id",
+  "user_email": "user@example.com",
+  "user_name": "User Name",
+  "user_picture": "profile-picture-url",
+  "ttl": 1234567890,
+  "created_at": 1234567890
+}
+```
+
+## Error Handling
+
+The application includes comprehensive error handling for:
+- Authentication failures
+- Token retrieval errors
+- DynamoDB connectivity issues
+- Bedrock agent communication errors
+
+## Production Deployment
+
+1. Set all environment variables securely
+2. Use a production WSGI server (e.g., Gunicorn)
+3. Configure proper logging
+4. Set up monitoring for DynamoDB and Bedrock
+5. Implement proper error tracking
+
+## License
+
+MIT
