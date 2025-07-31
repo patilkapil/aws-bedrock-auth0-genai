@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AWS Bedrock Help Desk</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #f7f9fc;
+            margin: 0;
+            padding: 0;
+        }
+        .chat-container {
+            max-width: 800px;
+            margin: 40px auto;
+            background: #fff;
+            border-radius: 16px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: #2b6cb0;
+            color: white;
+            padding: 20px;
+            font-size: 20px;
+        }
+        .user-info {
+            display: flex;
+            align-items: center;
+        }
+        .user-info img {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+        }
+        .user-info span {
+            margin-left: 10px;
+        }
+        .logout-btn {
+            color: white;
+            text-decoration: underline;
+            font-size: 14px;
+            margin-left: 20px;
+        }
+        #chat-box {
+            padding: 20px;
+            height: 400px;
+            overflow-y: auto;
+            background: #f0f4f8;
+        }
+        .user-msg, .agent-msg {
+            margin: 12px 0;
+            padding: 12px;
+            border-radius: 12px;
+            max-width: 75%;
+            line-height: 1.5;
+        }
+        .user-msg {
+            background: #e2e8f0;
+            align-self: flex-end;
+            text-align: right;
+        }
+        .agent-msg {
+            background: #bee3f8;
+            align-self: flex-start;
+        }
+        #chat-form {
+            display: flex;
+            border-top: 1px solid #e2e8f0;
+            padding: 16px;
+        }
+        #user-input {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #cbd5e0;
+            border-radius: 8px;
+            font-size: 16px;
+        }
+        button[type="submit"] {
+            background: #2b6cb0;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            margin-left: 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button[type="submit"]:hover {
+            background: #2c5282;
+        }
+    </style>
+</head>
+<body>
+<div class="chat-container">
+    <div class="header">
+        <div>AWS Bedrock powered by Auth0</div>
+        {% if user %}
+        <div class="user-info">
+            <img src="{{ user.picture }}" alt="User">
+            <span>{{ user.name }}</span>
+            <a href="/logout" class="logout-btn">Logout</a>
+        </div>
+        {% endif %}
+    </div>
+
+    <div id="chat-box"></div>
+
+    <form id="chat-form">
+        <input type="text" id="user-input" placeholder="How can I assist you today?" autocomplete="off" required>
+        <button type="submit">Send</button>
+    </form>
+</div>
+
+<script>
+    const chatBox = document.getElementById('chat-box');
+    const chatForm = document.getElementById('chat-form');
+    const userInput = document.getElementById('user-input');
+
+    chatForm.onsubmit = async (e) => {
+        e.preventDefault();
+        const message = userInput.value;
+        chatBox.innerHTML += `<div class='user-msg'><b>You:</b> ${message}</div>`;
+        userInput.value = '';
+        const res = await fetch('/chat', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({message})
+        });
+        const data = await res.json();
+        chatBox.innerHTML += `<div class='agent-msg'><b>Agent:</b> ${data.response}</div>`;
+        chatBox.scrollTop = chatBox.scrollHeight;
+    };
+</script>
+</body>
+</html>
