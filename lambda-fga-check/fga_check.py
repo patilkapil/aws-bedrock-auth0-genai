@@ -1,87 +1,117 @@
-# Step 01. Install the SDK
-# Install the SDK by following the steps at https://docs.fga.dev/integration/install-sdk
-# pip3 install openfga_sdk
+"""
+AWS Lambda function for Fine-Grained Authorization (FGA) checks using OpenFGA SDK.
+"""
+
 import asyncio
+import os
 
 import openfga_sdk
-from openfga_sdk.client import OpenFgaClient,ClientConfiguration
+from openfga_sdk.client import OpenFgaClient, ClientConfiguration
 from openfga_sdk.client.models import ClientCheckRequest
 from openfga_sdk.credentials import Credentials, CredentialConfiguration
 
-def get_env_variable(var_name, default=None, required=True):
-    """
-    Helper to fetch environment variables and optionally enforce their presence.
-    """
-    value = os.getenv(var_name, default)
-    if required and value is None:
-        raise EnvironmentError(f"Missing required environment variable: {var_name}")
-    return value
+# Environment variables for FGA configuration
+# These should be set in your Lambda environment for security
+FGA_API_ISSUER = os.getenv("FGA_API_ISSUER", "fga.us.auth0.com")
+FGA_API_AUDIENCE = os.getenv("FGA_API_AUDIENCE", "https://api.us1.fga.dev/")
+FGA_CLIENT_ID = os.getenv("FGA_CLIENT_ID", "your_client_id_here")
+FGA_CLIENT_SECRET = os.getenv("FGA_CLIENT_SECRET", "your_client_secret_here")
+FGA_API_SCHEME = os.getenv("FGA_API_SCHEME", "https")
+FGA_API_HOST = os.getenv("FGA_API_HOST", "api.us1.fga.dev")
+FGA_STORE_ID = os.getenv("FGA_STORE_ID", "your_store_id_here")
+FGA_AUTHORIZATION_MODEL_ID = os.getenv("FGA_AUTHORIZATION_MODEL_ID", "your_model_id_here")
 
-def build_fga_client():
+
+async def main(user_obj):
     """
-    Build and return an OpenFgaClient using environment variables for configuration.
+    Perform FGA authorization check for the given user object.
+    
+    Args:
+        user_obj: Dictionary containing user, relation, and object for authorization check
+        
+    Returns:
+        FGA check response object
     """
+    # Step 1: Set up client credentials for Auth0 authentication
+    # This uses the client_credentials flow to authenticate with the FGA service
     credentials = Credentials(
         method='client_credentials',
         configuration=CredentialConfiguration(
-            api_issuer=get_env_variable('FGA_API_ISSUER'),
-            api_audience=get_env_variable('FGA_API_AUDIENCE'),
-            client_id=get_env_variable('FGA_CLIENT_ID'),
-            client_secret=get_env_variable('FGA_CLIENT_SECRET')
+            api_issuer=FGA_API_ISSUER,
+            api_audience=FGA_API_AUDIENCE,
+            client_id=FGA_CLIENT_ID,
+            client_secret=FGA_CLIENT_SECRET
         )
     )
+    
+    # Step 2: Configure the OpenFGA client with connection details
+    # This includes the store ID and authorization model for the specific tenant
     configuration = ClientConfiguration(
-        api_scheme=get_env_variable('FGA_API_SCHEME', 'https', required=False),
-        api_host=get_env_variable('FGA_API_HOST'),
-        store_id=get_env_variable('FGA_STORE_ID'),
-        authorization_model_id=get_env_variable('FGA_AUTHORIZATION_MODEL_ID', required=False),
+        api_scheme=FGA_API_SCHEME,
+        api_host=FGA_API_HOST,
+        store_id=FGA_STORE_ID,
+        authorization_model_id=FGA_AUTHORIZATION_MODEL_ID,
         credentials=credentials,
     )
-    return OpenFgaClient(configuration)
-
-async def check_access(user_obj):
-    """
-    Asynchronously check access for a user-object-relation tuple using OpenFGA.
-    """
-    async with build_fga_client() as fga_client:
-        options = {}
-        model_id = os.getenv('FGA_AUTHORIZATION_MODEL_ID')
-        if model_id:
-            options['authorization_model_id'] = model_id
+    
+    # Step 3: Perform the authorization check
+    async with OpenFgaClient(configuration) as fga_client:
+        # Optional: Specify authorization model ID for better performance
+        options = {"authorization_model_id": FGA_AUTHORIZATION_MODEL_ID}
+        
+        # Create the check request with user:prefix format
+        # Format: user:<user_id> can <relation> <object>
         body = ClientCheckRequest(
-            user=f"user:{user_obj['user']}",
-            relation=user_obj['relation'],
-            object=user_obj['object'],
+            user='user:' + user_obj['user'],  # e.g., "user:alice@example.com"
+            relation=user_obj['relation'],    # e.g., "read"
+            object=user_obj['object'],        # e.g., "document:123"
         )
+        
+        # Execute the authorization check
         response = await fga_client.check(body, options)
-        await fga_client.close()
         return response
+        await fga_client.close()  # Cleanup connection
+
 
 def lambda_handler(event, context):
     """
-    AWS Lambda handler for FGA authorization check.
-    Expects event to contain 'user', 'relation', and 'object'.
-    Returns whether the user is authorized for the relation on the object.
+    AWS Lambda handler for FGA authorization checks.
+    
+    Args:
+        event: Lambda event containing user, relation, and object
+        context: Lambda context object
+        
+    Returns:
+        Authorization response with statusCode and isAuthorized flag
     """
-    # Validate input
-    for key in ('user', 'relation', 'object'):
-        if key not in event:
-            return {
-                'statusCode': 400,
-                'body': f"Missing required field: {key}"
-            }
-    user_obj = {
-        'user': event['user'],
-        'relation': event['relation'],
-        'object': event['object']
-    }
-    # Run the async check
-    result = asyncio.run(check_access(user_obj))
+    # Log the incoming event for debugging
+    print(event)
+    
+    # Extract authorization parameters from the event
+    # Expected format: {"user": "alice@example.com", "relation": "read", "object": "document:123"}
+    user_obj = {}
+    user_obj['relation'] = event['relation']  # The permission being checked
+    user_obj['user'] = event['user']         # The user requesting access
+    user_obj['object'] = event['object']     # The resource being accessed
+    
+    # Log the parsed user object
+    print(user_obj)
+    
+    # Execute the async FGA check using asyncio
+    # This will return the authorization result from OpenFGA
+    result = asyncio.run(main(user_obj))
+    
+    # Build the response object for the caller
     response = {
-        "isAuthorized": result.allowed,
+        "isAuthorized": result.allowed,  # Boolean: true if authorized, false if not
     }
+    
+    # Log the final response
+    print(response)
+
+    # Return the Lambda response in the expected format
+    # Both statusCode and isAuthorized are included for flexibility
     return {
-        "statusCode": 200,
-        "isAuthorized": result.allowed,
-        "body": response
+        "statusCode": 200,                    # HTTP status code
+        "isAuthorized": result.allowed,       # Authorization result
     }

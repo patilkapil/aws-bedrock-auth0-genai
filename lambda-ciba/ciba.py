@@ -1,282 +1,225 @@
 """
-AWS Lambda function for CIBA (Client Initiated Backchannel Authentication) implementation.
+AWS Lambda function for Client Initiated Backchannel Authentication (CIBA) with Auth0.
 
-This module provides a Lambda handler that implements the CIBA authentication flow
-using Auth0 as the identity provider. It supports polling-based token retrieval
-and integrates with AWS Bedrock agents for secure user authentication.
-
-Key Features:
-- CIBA authentication flow implementation
-- Token polling with exponential backoff
-- Integration with AWS Bedrock agents
-- Comprehensive error handling and logging
-- Configurable authentication parameters
-
-Author: [Your Name]
-Date: [Current Date]
-Version: 1.0.0
+This function implements the CIBA flow allowing users to authenticate via a separate device
+while processing Bedrock agent requests. The flow includes initiation, polling, and validation.
 """
 
-import logging
 import json
+import logging
+import os
 import time
-from typing import Dict, Any, Optional
 from http import HTTPStatus
+from typing import Any, Dict
+
 import requests
 
 # Configure logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Configuration constants - Replace with environment variables in production
-AUTH0_DOMAIN = "YOUR_AUTH0_DOMAIN"  # e.g., "your-tenant.us.auth0.com"
-AUTH0_CLIENT_ID = "YOUR_CLIENT_ID"
-AUTH0_CLIENT_SECRET = "YOUR_CLIENT_SECRET"
+# Environment variables for Auth0 CIBA configuration
+# These should be set in your Lambda environment for security
+AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "your-tenant.us.auth0.com")
+AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID", "your_client_id_here")
+AUTH0_CLIENT_SECRET = os.getenv("AUTH0_CLIENT_SECRET", "your_client_secret_here")
 
-# CIBA configuration
-DEFAULT_SCOPE = "openid profile"
-DEFAULT_BINDING_MESSAGE = "123456"
-DEFAULT_POLLING_INTERVAL = 5
-DEFAULT_TIMEOUT_BUFFER = 10  # seconds
+# CIBA configuration constants
+DEFAULT_SCOPE = os.getenv("CIBA_SCOPE", "openid profile")
+DEFAULT_BINDING_MESSAGE = os.getenv("CIBA_BINDING_MESSAGE", "123456")
 
 
-def poll_for_token(token_url: str, auth_req_id: str, expires_in: int, interval: int) -> Optional[Dict[str, Any]]:
+def poll_for_token(token_url: str, auth_req_id: str, expires_in: int, interval: int):
     """
-    Poll for authentication token using CIBA flow.
+    Poll for the authentication token using CIBA flow.
     
-    This function implements the polling mechanism as specified in the CIBA specification.
-    It handles various error conditions including authorization_pending and slow_down
-    responses from the authorization server.
+    This function continuously polls the Auth0 token endpoint until:
+    - Authentication is successful (returns tokens)
+    - Authentication fails or is denied
+    - Request times out
     
     Args:
-        token_url (str): The token endpoint URL
-        auth_req_id (str): The authentication request ID from the initial CIBA request
-        expires_in (int): Maximum time in seconds to wait for authentication
-        interval (int): Initial polling interval in seconds
+        token_url: Auth0 token endpoint URL
+        auth_req_id: Authentication request ID from CIBA initiation
+        expires_in: Maximum time to wait for authentication (seconds)
+        interval: Polling interval between requests (seconds)
         
     Returns:
-        Optional[Dict[str, Any]]: Token response if successful, None otherwise
-        
-    Raises:
-        requests.RequestException: If network requests fail
+        Token response dictionary if successful, None otherwise
     """
     start_time = time.time()
-    current_interval = interval
-    
-    logger.info(f"Starting token polling for auth_req_id: {auth_req_id}")
-    logger.info(f"Token expires in: {expires_in} seconds, initial interval: {interval} seconds")
 
     while True:
-        # Check if we've exceeded the timeout
-        elapsed_time = time.time() - start_time
-        if elapsed_time > (expires_in - DEFAULT_TIMEOUT_BUFFER):
-            logger.warning(f"Authentication request timed out after {elapsed_time:.2f} seconds")
+        # Check if polling has exceeded the allowed time
+        if time.time() - start_time > expires_in:
+            logger.warning("Authentication request timed out after %d seconds", expires_in)
             return None
 
-        # Prepare token request payload
+        # Prepare token request payload for CIBA grant type
         token_payload = {
-            'grant_type': 'urn:openid:params:grant-type:ciba',
-            'auth_req_id': auth_req_id,
+            'grant_type': 'urn:openid:params:grant-type:ciba',  # CIBA-specific grant type
+            'auth_req_id': auth_req_id,                         # Request ID from initiation
             'client_id': AUTH0_CLIENT_ID,
             'client_secret': AUTH0_CLIENT_SECRET
         }
 
+        # Set headers for form-encoded request
         headers = {
             "Content-Type": "application/x-www-form-urlencoded"
         }
 
         try:
-            logger.debug(f"Polling token endpoint (attempt {int(elapsed_time / current_interval) + 1})")
+            # Make token request to Auth0
             token_response = requests.post(token_url, data=token_payload, headers=headers)
 
+            # Check if authentication was successful
             if token_response.status_code == 200:
-                logger.info("Token successfully retrieved")
+                logger.info("CIBA authentication successful")
                 return token_response.json()
 
-            # Handle error responses
+            # Parse error response for specific handling
             error_response = token_response.json()
             error = error_response.get('error')
-            error_description = error_response.get('error_description', '')
 
+            # Handle authorization still pending (continue polling)
             if error == 'authorization_pending':
-                logger.debug(f"Authorization pending: {error_description}")
-                time.sleep(current_interval)
+                logger.info('Authorization pending. Retrying in %d seconds...', interval)
+                time.sleep(interval)
                 continue
 
+            # Handle rate limiting (slow down polling)
             if error == 'slow_down':
-                logger.info(f"Server requested slow down: {error_description}")
-                current_interval += 5
-                time.sleep(current_interval)
+                logger.info('Rate limited. Increasing polling interval by 5 seconds.')
+                interval += 5  # Increase interval to avoid rate limiting
+                time.sleep(interval)
                 continue
 
-            # Handle other errors
-            logger.error(f"Authentication failed with error: {error} - {error_description}")
+            # Handle other authentication errors (stop polling)
+            logger.error('Authentication failed with error: %s', error)
             return None
 
-        except requests.RequestException as e:
-            logger.error(f"Network error during token polling: {str(e)}")
-            return None
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON response from token endpoint: {str(e)}")
-            return None
         except Exception as e:
-            logger.error(f"Unexpected error during token polling: {str(e)}")
+            logger.error('Error during token polling: %s', str(e))
             return None
-
-
-def initiate_ciba_authentication(user_id: str, scope: str = DEFAULT_SCOPE, 
-                                binding_message: str = DEFAULT_BINDING_MESSAGE) -> Optional[Dict[str, Any]]:
-    """
-    Initiate CIBA authentication flow.
-    
-    This function creates the initial CIBA authentication request using the
-    backchannel authorization endpoint. It constructs the login_hint using
-    the issuer-subject format as required by Auth0.
-    
-    Args:
-        user_id (str): The user identifier for authentication
-        scope (str): OAuth2 scope for the authentication request
-        binding_message (str): Optional binding message for user verification
-        
-    Returns:
-        Optional[Dict[str, Any]]: Authentication response if successful, None otherwise
-        
-    Raises:
-        requests.RequestException: If the authentication request fails
-    """
-    url = f"https://{AUTH0_DOMAIN}/bc-authorize"
-    
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-
-    # Construct login_hint in issuer-subject format as required by Auth0
-    login_hint = {
-        "format": "iss_sub",
-        "iss": f"https://{AUTH0_DOMAIN}/",
-        "sub": user_id
-    }
-
-    payload = {
-        "client_id": AUTH0_CLIENT_ID,
-        "client_secret": AUTH0_CLIENT_SECRET,
-        "login_hint": json.dumps(login_hint),
-        "scope": scope,
-        "binding_message": binding_message
-    }
-
-    logger.info(f"Initiating CIBA authentication for user: {user_id}")
-    logger.debug(f"Authentication endpoint: {url}")
-    logger.debug(f"Scope: {scope}, Binding message: {binding_message}")
-
-    try:
-        response = requests.post(url, headers=headers, data=payload)
-        auth_data = response.json()
-
-        if response.status_code != 200:
-            logger.error(f"Failed to initiate authentication: {response.status_code}")
-            logger.error(f"Response: {auth_data}")
-            return None
-
-        logger.info("CIBA authentication initiated successfully")
-        logger.debug(f"Auth response: {auth_data}")
-        return auth_data
-
-    except requests.RequestException as e:
-        logger.error(f"Network error during authentication initiation: {str(e)}")
-        return None
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON response from auth endpoint: {str(e)}")
-        return None
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
-    AWS Lambda handler for processing Bedrock agent requests with CIBA authentication.
+    AWS Lambda handler for processing Bedrock agent CIBA authentication requests.
     
-    This handler integrates with AWS Bedrock agents to provide secure user authentication
-    using the CIBA flow. It extracts user information from session attributes,
-    initiates authentication, and polls for completion.
-    
-    The function follows this flow:
-    1. Extract user information from session attributes
-    2. Initiate CIBA authentication request
-    3. Poll for token completion
-    4. Return appropriate response to the Bedrock agent
-    
+    Flow:
+    1. Extract user ID from Bedrock session attributes
+    2. Initiate CIBA authentication request with Auth0
+    3. Poll for authentication completion
+    4. Return success/failure response to Bedrock agent
+
     Args:
-        event (Dict[str, Any]): Lambda event containing action details and session attributes
-        context (Any): Lambda context object
-        
+        event: The Lambda event containing action details and session attributes
+        context: The Lambda context object
+
     Returns:
-        Dict[str, Any]: Response containing the action execution results
-        
+        Response containing the CIBA authentication results
+
     Raises:
         KeyError: If required fields are missing from the event
     """
-    logger.info("Lambda handler invoked")
-    logger.debug(f"Event received: {json.dumps(event, default=str)}")
+    # Extract session attributes from Bedrock agent event
+    # These contain user information passed from the main application
+    session_attributes = event.get("sessionAttributes", {})
+
+    # Log the incoming event and user information
+    logger.info('Processing CIBA authentication request')
+    logger.info('Event received: %s', event)
+    logger.info('CIBA request initiated for user: %s', session_attributes.get('user_id'))
+
+    # Extract user ID for CIBA authentication
+    # This identifies the user who needs to authenticate via the secondary device
+    user_id = session_attributes['user_id']
+    
+    # CIBA request configuration
+    scope = DEFAULT_SCOPE                    # OAuth scopes to request
+    binding_message = DEFAULT_BINDING_MESSAGE  # Optional verification code for user
 
     try:
-        # Extract session attributes and user information
-        session_attributes = event.get("sessionAttributes", {})
-        user_id = session_attributes.get('user_id')
-        
-        if not user_id:
-            logger.error("User ID not found in session attributes")
-            return {
-                'statusCode': HTTPStatus.BAD_REQUEST,
-                'body': 'Error: User ID not found in session attributes'
-            }
-
-        logger.info(f"Processing CIBA request for user: {user_id}")
-
-        # Extract Bedrock agent parameters
+        # Extract required fields from Bedrock agent event
         action_group = event['actionGroup']
         function = event['function']
         message_version = event.get('messageVersion', 1)
+        parameters = event.get('parameters', [])
         
-        # Step 1: Initiate CIBA authentication
-        auth_data = initiate_ciba_authentication(user_id)
-        if not auth_data:
-            logger.error("Failed to initiate CIBA authentication")
+        # Construct Auth0 CIBA endpoints
+        ciba_url = f"https://{AUTH0_DOMAIN}/bc-authorize"      # CIBA initiation endpoint
+        token_url = f'https://{AUTH0_DOMAIN}/oauth/token'      # Token polling endpoint
+
+        # Set headers for CIBA initiation request
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+
+        # Construct login_hint in required Auth0 format
+        # This tells Auth0 which user should authenticate
+        login_hint = {
+            "format": "iss_sub",                           # Format specification
+            "iss": f"https://{AUTH0_DOMAIN}/",            # Issuer (Auth0 domain)
+            "sub": user_id                                # Subject (user identifier)
+        }
+
+        # Prepare CIBA initiation payload
+        payload = {
+            "client_id": AUTH0_CLIENT_ID,
+            "client_secret": AUTH0_CLIENT_SECRET,
+            "login_hint": json.dumps(login_hint),  # JSON-encoded login hint
+            "scope": scope,                        # Requested OAuth scopes
+            "binding_message": binding_message     # Optional verification code
+        }
+
+        # Step 1: Initiate CIBA authentication request
+        logger.info("Initiating CIBA authentication for user: %s", user_id)
+        response = requests.post(ciba_url, headers=headers, data=payload)
+        auth_data = response.json()
+
+        # Check if CIBA initiation was successful
+        if response.status_code != 200:
+            logger.error("Failed to initiate CIBA authentication: %d", response.status_code)
+            logger.error("Auth0 response: %s", auth_data)
+            # Note: Using exit(1) as in original structure
+            exit(1)
+
+        # Extract authentication request details from Auth0 response
+        auth_req_id = auth_data.get('auth_req_id')    # Unique request identifier
+        expires_in = auth_data.get('expires_in')      # Maximum wait time
+        interval = auth_data.get('interval', 5)       # Polling interval
+
+        # Log CIBA initiation success
+        logger.info('CIBA authentication request initiated successfully')
+        logger.info('Authentication request ID: %s', auth_req_id)
+        logger.info('Expires in: %d seconds', expires_in)
+        logger.info('Polling interval: %d seconds', interval)
+
+        # Step 2: Poll for authentication completion
+        logger.info("Waiting for user authentication on secondary device...")
+        tokens = poll_for_token(token_url, auth_req_id, expires_in, interval)
+        
+        # Step 3: Prepare response based on authentication result
+        response_body = ""
+        if tokens:
+            # Authentication successful - user completed CIBA flow
+            logger.info("CIBA authentication completed successfully")
             response_body = {
                 'TEXT': {
-                    'body': 'Failed to initiate user authentication process'
+                    'body': 'The Identity for the user executing the command has been validated and password instructions have been shared'
                 }
             }
         else:
-            # Extract authentication parameters
-            auth_req_id = auth_data.get('auth_req_id')
-            expires_in = auth_data.get('expires_in')
-            interval = auth_data.get('interval', DEFAULT_POLLING_INTERVAL)
-
-            logger.info(f"Authentication request ID: {auth_req_id}")
-            logger.info(f"Expires in: {expires_in} seconds, polling interval: {interval} seconds")
-
-            # Step 2: Poll for token completion
-            token_url = f'https://{AUTH0_DOMAIN}/oauth/token'
-            logger.info("Waiting for user authentication completion...")
-            
-            tokens = poll_for_token(token_url, auth_req_id, expires_in, interval)
-            
-            # Step 3: Handle authentication result
-            if tokens:
-                logger.info("User authentication completed successfully")
-                response_body = {
-                    'TEXT': {
-                        'body': 'User identity has been successfully validated and authentication completed'
-                    }
+            # Authentication failed or timed out
+            logger.warning("CIBA authentication failed or timed out")
+            response_body = {
+                'TEXT': {
+                    'body': 'The Identity can not be validated successfully'
                 }
-            else:
-                logger.warning("User authentication failed or timed out")
-                response_body = {
-                    'TEXT': {
-                        'body': 'User identity validation was unsuccessful. Please try again.'
-                    }
-                }
+            }
 
-        # Construct Bedrock agent response
+        # Prepare Bedrock agent response in required format
         action_response = {
             'actionGroup': action_group,
             'function': function,
@@ -285,24 +228,26 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             }
         }
         
+        # Final response structure for Bedrock agent
         response = {
             'response': action_response,
             'messageVersion': message_version
         }
 
-        logger.info("Lambda handler completed successfully")
-        logger.debug(f"Response: {json.dumps(response, default=str)}")
+        logger.info('CIBA process completed. Response: %s', response)
         return response
 
     except KeyError as e:
-        logger.error(f'Missing required field: {str(e)}')
+        # Handle missing required fields in the event
+        logger.error('Missing required field in event: %s', str(e))
         return {
             'statusCode': HTTPStatus.BAD_REQUEST,
-            'body': f'Error: Missing required field - {str(e)}'
+            'body': f'Error: {str(e)}'
         }
     except Exception as e:
-        logger.error(f'Unexpected error in lambda handler: {str(e)}')
+        # Handle any unexpected errors during CIBA process
+        logger.error('Unexpected error during CIBA authentication: %s', str(e))
         return {
             'statusCode': HTTPStatus.INTERNAL_SERVER_ERROR,
-            'body': 'Internal server error occurred during authentication processing'
+            'body': 'Internal server error'
         }
